@@ -60,6 +60,7 @@ class HDF5EEGDataset:
         with h5py.File(self.h5_file_path, 'w') as h5f:
             # Only create processed_data, features, and metadata groups
             h5f.create_group('processed_data') # Preprocessed EEG data  
+            h5f.create_group('time_data')
             h5f.create_group('features')       # Extracted features (includes window metadata)
             h5f.create_group('metadata')       # Dataset-level metadata
             
@@ -97,6 +98,15 @@ class HDF5EEGDataset:
                     compression='gzip',
                     compression_opts=6
                 )
+                processed_dataset_time = h5f['time_data'].create_dataset(
+                    dataset_id,
+                    shape=(0,),
+                    maxshape=(None,),
+                    dtype='float32',
+                    chunks=True,
+                    compression='gzip',
+                    compression_opts=6
+                )
                 h5f['processed_data'][dataset_id].attrs['min_time'] = min_time
                 h5f['processed_data'][dataset_id].attrs['max_time'] = max_time
                 h5f['processed_data'][dataset_id].attrs['total_samples'] = total_samples
@@ -106,16 +116,21 @@ class HDF5EEGDataset:
                 while current_time < max_time:
                     chunk_end = min(current_time + self.chunk_size_ms, max_time)
                     chunk_df = self._load_chunk_duckdb(path, current_time, chunk_end)
+                    print(chunk_df)
                     if chunk_df.empty:
                         current_time = chunk_end
                         continue
                     eeg_data = chunk_df['EEG'].values
+                    time_data = chunk_df['Time'].values
                     preprocessed = apply_preprocessing(pd.DataFrame({'EEG': eeg_data}), self.config)
                     chunk_size = len(preprocessed)
                     # Resize dataset to accommodate new chunk
                     old_size = processed_dataset.shape[0]
+                    old_size_time = processed_dataset_time.shape[0]
                     processed_dataset.resize((old_size + chunk_size,))
+                    processed_dataset_time.resize((old_size_time + chunk_size,))
                     processed_dataset[old_size:old_size + chunk_size] = preprocessed
+                    processed_dataset_time[old_size_time:old_size_time + chunk_size] = time_data
                     print(f"  Chunk {chunk_idx}: {len(chunk_df):,} samples (preprocessed: {chunk_size})")
                     current_time = chunk_end
                     chunk_idx += 1

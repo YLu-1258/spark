@@ -1,8 +1,8 @@
 import os
 import numpy as np
 import pandas as pd
-from .preprocessing.apply_preprocessing import apply_preprocessing
-from .preprocessing.segment_windows import segment_windows
+from ..preprocessing.apply_preprocessing import apply_preprocessing
+from ..preprocessing.segment_windows import segment_windows
 from dataclasses import dataclass
 from pathlib import Path
 

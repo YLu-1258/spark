@@ -7,10 +7,10 @@ from zarr.storage import LocalStore
 from tqdm.auto import tqdm
 from collections import defaultdict
 import yaml as yml
-from .config import *
+from ..config import *
 from .dataset import EEGDataset
-from .features.extractors import extract_features
-from .preprocessing.normalization import robust_winsor_scale
+from ..features.extractors import extract_features
+from ..preprocessing.normalization import robust_winsor_scale
 from ruamel.yaml import YAML
 
 def generate_config(project_name: str):
