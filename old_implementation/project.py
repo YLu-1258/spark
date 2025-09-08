@@ -108,6 +108,8 @@ def load_data(project_name: str, config : dict):
         os.makedirs(data_dir)
     
     for filename in os.listdir(original_data_dir):
+        if (not filename.endswith('.parquet')):
+            continue
         src = os.path.join(original_data_dir, filename)
         dst = os.path.join(data_dir, filename)
         if not os.path.exists(dst):

@@ -6,6 +6,9 @@ from pathlib import Path
 from tqdm.auto import tqdm
 from collections import defaultdict
 import yaml as yml
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+import sys
 from .config import *
 from .dataset_hdf5 import HDF5EEGDataset
 from .features.extractors import extract_features
@@ -469,7 +472,7 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
     """
     
     if output_dir is None:
-        output_dir = Path(h5_path).parent / 'analysis_results'
+        output_dir = Path(h5_path).parent / 'predictions'
     else:
         output_dir = Path(output_dir)
     
@@ -568,10 +571,154 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
             print(f"✅ Predictions saved to: {predictions_path}")
             return all_predictions, all_probabilities, str(predictions_path)
     
+    def generate_clustered_dataframe(config: dict):
+        h5_path = config['project_name'] + '/data_store.h5'
+        npz_path = config['project_name'] + '/predictions/gmm_predictions.npz'
+        if (not os.path.exists(h5_path)):
+            raise ValueError(f"HDF5 data file not found: {h5_path}, run feature extraction first")
+        if (not os.path.exists(npz_path)):
+            raise ValueError(f"Predictions file not found: {npz_path}, run GMM prediction first")
+        
+        data = np.load("/Users/alexa/Projects/ChenLab/seizure_library/test_project/predictions/gmm_predictions.npz")
+
+
+        all_windows = []
+        with h5py.File("/Users/alexa/Projects/ChenLab/seizure_library/test_project/data_store.h5", 'a') as h5f:
+            for dataset in h5f['processed_data']:
+                meta_data = h5f['metadata'][dataset + '_window_info'][:]
+                eeg_data = h5f['processed_data'][dataset][:]
+                start_indices = [int(i[3]) for i in meta_data]
+                time_int_select = h5f['time_data'][dataset][:]
+                start_time = time_int_select[start_indices]
+                predictions = data[dataset + '_predictions']
+                df_clusters = pd.DataFrame(predictions, columns=['cluster'])
+                df_meta = pd.DataFrame(meta_data)
+                df_meta['dataset'] = dataset
+                df_meta['start_time'] = start_time
+                df_meta['cluster'] = df_clusters['cluster']
+
+                all_windows.append(df_meta)
+
+        df_all = pd.concat(all_windows, ignore_index=True)
+        # save as file
+        df_all.to_csv(config['project_name'] + '/predictions/clustered_windows.csv', index=False)
+        return df_all
+    
+    def show_figure(cluster, config, highlight_color="tab:blue"):
+        try:
+            df_cluster = pd.read_csv(config['project_name'] + '/predictions/clustered_windows.csv')
+        except Exception as e:
+            df_cluster = generate_clustered_dataframe(config)
+            print(f"Generated clustered dataframe due to error: {e}")
+        # Sample then sort to improve HDF5 cache locality
+        sample_df = df_cluster.sample(n=min(20, len(df_cluster)), random_state=42).copy()
+        sample_df = sample_df.sort_values(['dataset', 'start_idx']).reset_index(drop=True)
+
+        forward_back_time_s=config.get('window_size', 2.0)
+
+        fig, axes = plt.subplots(5, 4, figsize=(20, 16))
+        axes = axes.flatten()
+
+        with h5py.File(h5_path, 'r') as h5f:
+            ds_cache = {}
+
+            for i, ax in enumerate(axes):
+                if i >= len(sample_df):
+                    ax.set_facecolor('black'); ax.axis('off'); continue
+
+                row = sample_df.iloc[i]
+                ds_name = row['dataset']
+
+                # Lazy-open dataset handles; infer fs cheaply
+                if ds_name not in ds_cache:
+                    eeg_ds = h5f['processed_data'][ds_name]
+                    t_ds = h5f['time_data'][ds_name]  # milliseconds
+                    fs = config.get('sampling_rate', None)
+                    if fs is None:
+                        t2 = t_ds[0:2]
+                        fs = 1000.0 / (t2[1] - t2[0]) if len(t2) == 2 and (t2[1] - t2[0]) > 0 else 500.0
+                    ds_cache[ds_name] = (eeg_ds, t_ds, float(fs))
+
+                eeg_ds, t_ds, fs = ds_cache[ds_name]
+                n_samples_ds = eeg_ds.shape[0]
+
+                # Event (chunk) indices
+                ev_start = int(row['start_idx'])
+                ev_end   = int(row['end_idx'])
+
+                # Context window in samples
+                pad = int(round(forward_back_time_s * fs))
+                win_start = max(ev_start - pad, 0)
+                win_end   = min(ev_end + pad, n_samples_ds)
+
+                if win_end <= win_start:
+                    ax.set_facecolor('lightgray')
+                    ax.text(0.5, 0.5, 'Invalid range', ha='center', va='center', fontsize=10)
+                    ax.axis('off')
+                    continue
+
+                # Read ONLY the needed slices
+                t_win_ms = t_ds[win_start:win_end]
+                y = eeg_ds[win_start:win_end]
+
+                # Anchor time to the event start so the event spans [0, duration]
+                t0_ms = t_ds[ev_start]
+
+                if ev_end < n_samples_ds:
+                    t1_ms = t_ds[ev_end]
+                else:
+                    t1_ms = t_ds[ev_end - 1] + (1000.0 / fs)
+
+                x = (t_win_ms - t0_ms) / 1000.0
+
+                ax.plot(x, y, linewidth=0.8)
+
+                # Blue highlight exactly over the sampled chunk
+                chunk_duration_s = (t1_ms - t0_ms) / 1000.0
+                ax.axvspan(0.0, chunk_duration_s, facecolor=highlight_color, alpha=0.3)
+
+                # Ensure requested context is visible on both sides (may be truncated at edges)
+                ax.set_xlim(-forward_back_time_s, chunk_duration_s + forward_back_time_s)
+
+                # Robust y-limits
+                lo, hi = np.percentile(y, [1, 99])
+                margin = max((hi - lo) * 0.1, 1e-6)
+                ax.set_ylim(lo - margin, hi + margin)
+
+                ax.set_title(f"Sample {i+1}")
+                ax.axis('off')
+
+        fig.suptitle(f"Cluster {cluster} - Random Samples", fontsize=20)
+        fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+        return fig
+    
+    def create_figure_pdf(config, pdf_name="cluster_samples.pdf"):
+        try:
+            df_cluster = pd.read_csv(config['project_name'] + '/predictions/clustered_windows.csv')
+        except Exception as e:
+            df_cluster = generate_clustered_dataframe(config)
+            print(f"Generated clustered dataframe due to error: {e}")
+
+        
+        all_clusters = df_cluster['cluster'].unique()
+        all_clusters.sort()
+        output_dir = Path(config['project_name']) / 'predictions'
+        pdf_path = output_dir / pdf_name
+        with PdfPages(pdf_path) as pdf:
+            for cluster in all_clusters:
+                fig = show_figure(cluster, config)
+                pdf.savefig(fig)
+                plt.close(fig)
+        
+        print(f"✅ Saved cluster samples to PDF: {pdf_path}")
+        return pdf_path
+    
     return {
         'h5_path': h5_path,
         'output_dir': str(output_dir),
         'fit_gmm': fit_gmm_on_sample,
         'predict_gmm': predict_all_gmm,
+        'create_figure_pdf': create_figure_pdf,
+        'create': show_figure,
         'loader_class': HDF5FeatureLoader
     }

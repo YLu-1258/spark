@@ -28,6 +28,7 @@ class HDF5EEGDataset:
     """
     
     def __init__(self, config, chunk_size_minutes: int = 60, h5_file_path: str = None):
+        print("DATA DIR:", config['data_dir'])
         self.raw_files = self.list_raw_files(config['data_dir'])
         self.config = config
         self.chunk_size_minutes = chunk_size_minutes
@@ -116,7 +117,6 @@ class HDF5EEGDataset:
                 while current_time < max_time:
                     chunk_end = min(current_time + self.chunk_size_ms, max_time)
                     chunk_df = self._load_chunk_duckdb(path, current_time, chunk_end)
-                    print(chunk_df)
                     if chunk_df.empty:
                         current_time = chunk_end
                         continue
