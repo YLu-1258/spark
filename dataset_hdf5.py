@@ -131,7 +131,6 @@ class HDF5EEGDataset:
                     processed_dataset_time.resize((old_size_time + chunk_size,))
                     processed_dataset[old_size:old_size + chunk_size] = preprocessed
                     processed_dataset_time[old_size_time:old_size_time + chunk_size] = time_data
-                    print(f"  Chunk {chunk_idx}: {len(chunk_df):,} samples (preprocessed: {chunk_size})")
                     current_time = chunk_end
                     chunk_idx += 1
                     del chunk_df

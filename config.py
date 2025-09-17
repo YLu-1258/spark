@@ -36,6 +36,7 @@ class DetectorCfg:
     GMM_components: int
     UMAP_seed: int
     GMM_seed: int
+    label_options: List[str]
 
 @dataclass
 class Config:
@@ -85,7 +86,8 @@ __DetectorCfg = DetectorCfg(
     UMAP_components=3,
     GMM_components=25,
     UMAP_seed=0,
-    GMM_seed=0
+    GMM_seed=0,
+    label_options=["seizure", "normal", "artifact", "unknown"]
 )
 
 __CONFIG = Config(

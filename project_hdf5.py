@@ -5,6 +5,8 @@ import h5py
 from pathlib import Path
 from tqdm.auto import tqdm
 from collections import defaultdict
+from IPython.display import display, clear_output
+from ipywidgets import widgets
 import yaml as yml
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -15,6 +17,7 @@ from .features.extractors import extract_features
 from .preprocessing.normalization import robust_winsor_scale
 from .analysis.gmm_model import fit_gmm, predict_gmm
 import gc
+
 
 def create_hdf5_dataset(config: dict, force_reload: bool = False):
     """
@@ -611,6 +614,7 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
             df_cluster = generate_clustered_dataframe(config)
             print(f"Generated clustered dataframe due to error: {e}")
         # Sample then sort to improve HDF5 cache locality
+        df_cluster = df_cluster[df_cluster['cluster'] == cluster]
         sample_df = df_cluster.sample(n=min(20, len(df_cluster)), random_state=42).copy()
         sample_df = sample_df.sort_values(['dataset', 'start_idx']).reset_index(drop=True)
 
@@ -692,6 +696,125 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
         fig.tight_layout(rect=[0, 0.03, 1, 0.95])
         return fig
     
+    def interactive_label_clusters_ui(config):
+        try:
+            df_cluster = pd.read_csv(config['project_name'] + '/predictions/clustered_windows.csv')
+        except Exception as e:
+            df_cluster = generate_clustered_dataframe(config)
+            print(f"Generated clustered dataframe due to error: {e}")
+
+        output_folder = Path(config.get("project_name", None))
+        clusters = sorted(df_cluster['cluster'].unique())
+        cluster_labels = [None] * len(clusters)
+        figures = [None] * len(clusters)
+
+        pdf_path = output_folder / "results" / "example_clustered_signals.pdf"
+        csv_path = output_folder / "results" / "labels.csv"
+        label_options = config.get("label_options", None)
+        if label_options is None:
+            label_options = ["seizure", "normal", "artifact", "unknown"]
+
+        current_index = {'value': 0}
+        selected_label_index = [None]
+        
+        # Widgets
+        output = widgets.Output()
+        label_buttons = []
+        label_box = widgets.VBox()
+        next_button = widgets.Button(description="Next ▶", button_style='success')
+        back_button = widgets.Button(description="◀ Back", button_style='warning')
+        select_cluster = widgets.Dropdown(options=clusters, description="Select cluster")
+        status_label = widgets.Label()
+        control_box = widgets.HBox([back_button, next_button, select_cluster])
+
+        def render_label_buttons(selected=None):
+            label_buttons.clear()
+            label_box.children = []
+            for i, label in enumerate(label_options):
+                marker = "✅ " if i == selected else "⬜ "
+                btn = widgets.Button(description=marker + label, layout=widgets.Layout(width='150px'))
+                btn.on_click(lambda b, idx=i: select_label(idx))
+                label_buttons.append(btn)
+            label_box.children = label_buttons
+
+        def select_label(index):
+            selected_label_index[0] = index
+            render_label_buttons(selected=index)
+
+        def display_samples():
+            idx = current_index['value']
+            cluster = clusters[idx]
+
+            fig = show_figure(cluster, config)
+            figures[idx] = fig
+
+            # Restore previous label if any
+            prev_label = cluster_labels[idx][1] if cluster_labels[idx] else None
+            selected_idx = label_options.index(prev_label) if prev_label in label_options else None
+            selected_label_index[0] = selected_idx
+            render_label_buttons(selected_label_index[0])
+            status_label.value = f"Cluster {cluster} ({idx + 1}/{len(clusters)})"
+
+            with output:
+                clear_output(wait=True)
+                display(widgets.HBox([label_box]))
+                display(fig)
+            plt.close(fig)
+            return None
+
+        def on_next(b):
+            idx = current_index['value']
+            if selected_label_index[0] is None:
+                status_label.value = "⚠️ Please select a label before continuing."
+                return
+            cluster_labels[idx] = (clusters[idx], label_options[selected_label_index[0]])
+            if idx < len(clusters) - 1:
+                current_index['value'] += 1
+                display_samples()
+            else:
+                # Save PDF
+                with PdfPages(pdf_path) as pdf:
+                    for fig in figures:
+                        pdf.savefig(fig)
+                        plt.close(fig)
+                # Save labels CSV
+                
+                label_df = pd.DataFrame(cluster_labels, columns=["cluster", "label"])
+                label_df.to_csv(csv_path, index=False)
+                # edit clustered_windows here
+                windows_path = config.get("project_name", None) + "/predictions/clustered_windows.csv"
+                windows_df = pd.read_csv(windows_path)
+                windows_df = windows_df.merge(
+                    label_df,
+                    on='cluster', how='left'
+                )
+                windows_df.to_csv(windows_path)
+                with output:
+                    clear_output()
+                    print(f"\n✅ All done!")
+                    print(f"📄 PDF saved to: {pdf_path}")
+                    print(f"📝 Labels saved to: {csv_path}")
+                    display(label_df)
+
+        def on_back(b):
+            if current_index['value'] > 0:
+                current_index['value'] -= 1
+                display_samples()
+                
+        def on_select(b):
+            idx = clusters.index(select_cluster.value)
+            current_index['value'] = idx
+            display_samples()
+
+        next_button.on_click(on_next)
+        back_button.on_click(on_back)
+        select_cluster.observe(on_select, names='value')
+
+        # Layout
+        display(widgets.VBox([status_label, control_box, output]))
+        display_samples()
+
+        
     def create_figure_pdf(config, pdf_name="cluster_samples.pdf"):
         try:
             df_cluster = pd.read_csv(config['project_name'] + '/predictions/clustered_windows.csv')
@@ -720,5 +843,6 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
         'predict_gmm': predict_all_gmm,
         'create_figure_pdf': create_figure_pdf,
         'create': show_figure,
+        'label': interactive_label_clusters_ui,
         'loader_class': HDF5FeatureLoader
     }
