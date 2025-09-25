@@ -1,6 +1,6 @@
 import pandas as pd
 from .filters import highpass_filter, bandpass_filter
-from .normalization import robust_winsor_scale
+from .normalization import robust_winsor_scale, zscore_normalize
 from .padnan import fill_nan_with_zero
 import numpy as np
 def apply_preprocessing(data: pd.DataFrame, config : dict):
@@ -23,5 +23,7 @@ def apply_preprocessing(data: pd.DataFrame, config : dict):
     eeg_filtered = highpass_filter(eeg_padded, cutoff=5, fs=2 * config['sampling_rate'])
 
     # robust standardization
-    eeg_normalized = robust_winsor_scale(eeg_filtered, win_quant=(0.01, 0.99), scale_quant=(0.25, 0.75), axis=0, epsilon=1e-8, inplace=False)
+    # Change this to zscore normalization
+    # Use winsor for feature normalization
+    eeg_normalized = zscore_normalize(eeg_filtered)
     return eeg_normalized

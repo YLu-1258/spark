@@ -1,5 +1,34 @@
 import numpy as np
 from typing import Optional, Tuple
+
+def zscore_normalize(arr: np.ndarray, axis: Optional[int] = None, epsilon: float = 1e-8, inplace: bool = False) -> np.ndarray:
+    """
+    Z-score normalization to standardize the input array.
+    
+    Parameters:
+        arr : 输入 numpy 数组（支持任意维度） (Input numpy array of any dimension)
+        axis : 计算轴向 (None 为全局处理)
+        epsilon : 防止除零的极小值 
+        inplace : 是否原地修改
+    Returns:
+        处理后的 numpy 数组
+    """
+    if np.isnan(arr).any():
+        raise ValueError("Input contains NaNs. Please handle them before normalization.")
+
+    # inplace or not
+    arr = arr if inplace else arr.copy()
+
+    mean = np.mean(arr, axis=axis, keepdims=True)
+    std = np.std(arr, axis=axis, keepdims=True)
+
+    # Ensure std is not too small to avoid division issues
+    std = np.where(std < epsilon, epsilon, std)
+
+    arr -= mean
+    arr /= std
+
+    return arr
 def robust_winsor_scale(
     arr: np.ndarray,
     win_quant: Tuple[float, float] = (0.01, 0.99),

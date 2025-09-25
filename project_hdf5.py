@@ -591,13 +591,16 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
                 meta_data = h5f['metadata'][dataset + '_window_info'][:]
                 eeg_data = h5f['processed_data'][dataset][:]
                 start_indices = [int(i[3]) for i in meta_data]
+                end_indices = [int(i[4]) for i in meta_data]
                 time_int_select = h5f['time_data'][dataset][:]
-                start_time = time_int_select[start_indices]
+                start_time = time_int_select[start_indices] / 1000
+                end_time = time_int_select[end_indices] / 1000
                 predictions = data[dataset + '_predictions']
                 df_clusters = pd.DataFrame(predictions, columns=['cluster'])
                 df_meta = pd.DataFrame(meta_data)
                 df_meta['dataset'] = dataset
                 df_meta['start_time'] = start_time
+                df_meta['end_time'] = end_time
                 df_meta['cluster'] = df_clusters['cluster']
 
                 all_windows.append(df_meta)
@@ -781,14 +784,13 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
                 
                 label_df = pd.DataFrame(cluster_labels, columns=["cluster", "label"])
                 label_df.to_csv(csv_path, index=False)
+
+                cluster_to_label = label_df.set_index('cluster')['label']
                 # edit clustered_windows here
-                windows_path = config.get("project_name", None) + "/predictions/clustered_windows.csv"
+                windows_path = config.get("project_name", None) + "/predictions/labeled_windows.csv"
                 windows_df = pd.read_csv(windows_path)
-                windows_df = windows_df.merge(
-                    label_df,
-                    on='cluster', how='left'
-                )
-                windows_df.to_csv(windows_path)
+                windows_df['label'] = windows_df['cluster'].map(cluster_to_label)
+                windows_df.to_csv(windows_path, index=False)
                 with output:
                     clear_output()
                     print(f"\n✅ All done!")
@@ -836,6 +838,30 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
         print(f"✅ Saved cluster samples to PDF: {pdf_path}")
         return pdf_path
     
+    def create_signal_pdf(config, pdf_name="signal_labeled.pdf"):
+        windows_path = config.get("project_name", None) + "/predictions/clustered_windows.csv"
+        windows_df = pd.read_csv(windows_path)
+        output_dir = Path(config['project_name']) / 'results'
+        pdf_path = output_dir / pdf_name
+        with PdfPages(pdf_path) as pdf:
+            with h5py.File(h5_path, 'r') as h5f:
+                for dataset in windows_df['dataset'].unique():
+                    eeg_signal = h5f['processed_data'][dataset][:]
+                    metadata = h5f['metadata'][dataset + "_window_info"][:]
+                    start_indices = [int(i[3]) for i in metadata]
+                    time_int_select = h5f['time_data'][dataset][:]
+                    start_time = time_int_select[start_indices]
+                    labels = windows_df[windows_df['dataset'] == dataset]['label']
+                    plt.ion()
+                    fig = plt.figure(figsize=(15,6))
+                    ax1 = fig.add_subplot(111)
+                    ax2 = ax1.twinx()
+                    ax1.plot((time_int_select - time_int_select[0])/1000/60, eeg_signal, 'r')
+                    ax2.plot((start_time - time_int_select[0])/1000/60, labels, '.', markersize=5)
+                    pdf.savefig(fig)
+                    plt.close(fig)
+                
+
     return {
         'h5_path': h5_path,
         'output_dir': str(output_dir),
@@ -844,5 +870,7 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
         'create_figure_pdf': create_figure_pdf,
         'create': show_figure,
         'label': interactive_label_clusters_ui,
+        'create_labeled_pdf': create_signal_pdf,
+        'create_clustered_dataframe': generate_clustered_dataframe,
         'loader_class': HDF5FeatureLoader
     }

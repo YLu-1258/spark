@@ -116,7 +116,7 @@ class HDF5EEGDataset:
                 chunk_idx = 0
                 while current_time < max_time:
                     chunk_end = min(current_time + self.chunk_size_ms, max_time)
-                    chunk_df = self._load_chunk_duckdb(path, current_time, chunk_end)
+                    chunk_df = self._load_chunk_duckdb(path, current_time, chunk_end, min_time)
                     if chunk_df.empty:
                         current_time = chunk_end
                         continue
@@ -136,14 +136,14 @@ class HDF5EEGDataset:
                     del chunk_df
                 print(f"  ✅ {dataset_id} converted and preprocessed with {chunk_idx} chunks")
     
-    def _load_chunk_duckdb(self, path: str, start_time: float, end_time: float) -> pd.DataFrame:
+    def _load_chunk_duckdb(self, path: str, start_time: float, end_time: float, first_time: float) -> pd.DataFrame:
         """Load a time chunk from parquet file using DuckDB"""
         con = duckdb.connect(database=':memory:')
         
         try:
             con.execute(f"""
                 CREATE TABLE temp_data AS
-                SELECT *, (pi_time - FIRST_VALUE(pi_time) OVER ()) AS Time
+                SELECT *, (pi_time - {first_time}) AS Time
                 FROM parquet_scan('{path}')
                 WHERE pi_time BETWEEN {start_time} AND {end_time}
             """)
