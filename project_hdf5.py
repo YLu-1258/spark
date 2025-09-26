@@ -787,7 +787,7 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
 
                 cluster_to_label = label_df.set_index('cluster')['label']
                 # edit clustered_windows here
-                windows_path = config.get("project_name", None) + "/predictions/labeled_windows.csv"
+                windows_path = config.get("project_name", None) + "/predictions/clustered_windows.csv"
                 windows_df = pd.read_csv(windows_path)
                 windows_df['label'] = windows_df['cluster'].map(cluster_to_label)
                 windows_df.to_csv(windows_path, index=False)
@@ -816,7 +816,146 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
         display(widgets.VBox([status_label, control_box, output]))
         display_samples()
 
-        
+    def merge_consecutive_windows(df: pd.DataFrame) -> pd.DataFrame:
+        merged_events = []
+        for dataset, group in df.groupby('dataset'):
+            group = group.sort_values(by='start_time').reset_index(drop=True)
+            if group.empty:
+                continue
+            current_event = {
+                'dataset': dataset,
+                'start_time': group.loc[0, 'start_time'],
+                'end_time': group.loc[0, 'end_time'],
+                'start_idx': group.loc[0, 'start_idx'],
+                'end_idx': group.loc[0, 'end_idx'],
+                'label': group.loc[0, 'label']
+            }
+            for idx in range(1, len(group)):
+                row = group.loc[idx]
+                if row['label'] == current_event['label'] and row['start_time'] <= current_event['end_time']:
+                    # Extend the current event
+                    current_event['end_time'] = max(current_event['end_time'], row['end_time'])
+                    current_event['end_idx'] = max(current_event['end_idx'], row['end_idx'])
+                else:
+                    # Save the current event and start a new one
+                    current_event['duration'] = round(current_event['end_time'] - current_event['start_time'], 1)
+                    merged_events.append(current_event)
+                    current_event = {
+                        'dataset': dataset,
+                        'start_time': row['start_time'],
+                        'end_time': row['end_time'],
+                        'start_idx': row['start_idx'],
+                        'end_idx': row['end_idx'],
+                        'label': row['label']
+                    }
+            # Save the last event
+            current_event['duration'] = round(current_event['end_time'] - current_event['start_time'], 1)
+            merged_events.append(current_event)
+        return pd.DataFrame(merged_events)
+
+    def merge_seizure_windows(df, max_gap_seconds=5):
+        """
+        Merge seizure windows that are within `max_gap_seconds` of each other,
+        and absorb every intervening window into the merged seizure window.
+        Operates per `dataset`.
+        """
+        df = df.sort_values(['dataset', 'start_time']).reset_index(drop=True).copy()
+        df['is_seiz'] = df['label'].eq('seizure')
+        df['row_i'] = np.arange(len(df))
+
+        # Work only on seizure rows to form "clusters" of seizures close in time
+        seiz = df[df['is_seiz']].copy()
+        # gap from previous seizure end -> current seizure start (per dataset)
+        seiz['gap_prev'] = (
+            seiz['start_time'] - seiz.groupby('dataset')['end_time'].shift()
+        )
+
+        # Start a new cluster when the gap is > max_gap or for the first seizure
+        new_cluster = (seiz['gap_prev'].isna() | (seiz['gap_prev'] > max_gap_seconds))
+        seiz['cluster'] = new_cluster.groupby(seiz['dataset']).cumsum()
+
+        # Get row index bounds for each (dataset, cluster)
+        bounds = (
+            seiz.groupby(['dataset', 'cluster'])
+                .agg(first_row=('row_i', 'min'), last_row=('row_i', 'max'))
+                .reset_index()
+        )
+
+        # Mark rows that fall inside any seizure cluster span (absorb in-between windows)
+        df['cluster_key'] = pd.NA
+        for _, r in bounds.iterrows():
+            m = (df['dataset'].eq(r['dataset']) &
+                df['row_i'].between(r['first_row'], r['last_row']))
+            df.loc[m, 'cluster_key'] = f"{r['dataset']}::{int(r['cluster'])}"
+
+        # Collapse each cluster to a single seizure window
+        merged = (
+            df[df['cluster_key'].notna()]
+            .groupby('cluster_key', as_index=False)
+            .agg(dataset=('dataset', 'first'),
+                start_time=('start_time', 'min'),
+                end_time=('end_time', 'max'),
+                start_idx=('start_idx', 'min'),
+                end_idx=('end_idx', 'max'))
+        )
+        merged['label'] = 'seizure'
+        # round to 1 decimal
+        merged['duration'] = round(merged['end_time'] - merged['start_time'], 1)
+        merged = merged[['dataset', 'start_time', 'end_time', 'start_idx', 'end_idx', 'label', 'duration']]
+
+        # Keep everything outside clusters as-is
+        rest = df[df['cluster_key'].isna()][['dataset', 'start_time', 'end_time', 'start_idx', 'end_idx', 'label', 'duration']]
+
+        # Final, ordered output
+        out = (
+            pd.concat([rest, merged], ignore_index=True)
+            .sort_values(['dataset', 'start_time'], kind='mergesort')
+            .reset_index(drop=True)
+        )
+        return out
+    
+    def label_interictal(df, seizure_requirement = 10):
+        """
+        Label interictal periods in the dataframe based on the seizure requirement.
+        An interictal period is defined as a period of at least `seizure_requirement` seconds
+        between two seizures.
+
+        Parameters:
+        df (pd.DataFrame): DataFrame containing seizure events with columns ['dataset', 'start_time', 'end_time', 'label', 'duration'].
+        seizure_requirement (int): Minimum duration in seconds to consider a period as interictal.
+
+        Returns:
+        pd.DataFrame: DataFrame with interictal periods labeled.
+        """
+        for index, row in df.iterrows():
+            if row['label'] != 'seizure':
+                continue
+
+            if (row["duration"] < seizure_requirement):
+                df.at[index, 'label'] = 'interictal'
+	
+    def create_merged_seizures(config):
+        try:
+            df_cluster = pd.read_csv(config['project_name'] + '/predictions/clustered_windows.csv')
+        except Exception as e:
+            df_cluster = generate_clustered_dataframe(config)
+            print(f"Generated clustered dataframe due to error: {e}")
+
+        # Merge consecutive windows with the same label
+        merged_df = merge_consecutive_windows(df_cluster)
+
+        # Further merge seizure windows that are close in time
+        merged_df = merge_seizure_windows(merged_df, max_gap_seconds=5)
+
+        # Label interictal periods
+        label_interictal(merged_df, seizure_requirement=10)
+
+        # Save to CSV
+        output_path = Path(config['project_name']) / 'results' / 'merged_windows.csv'
+        merged_df.to_csv(output_path, index=False)
+        print(f"✅ Merged events saved to: {output_path}")
+        return output_path
+    
     def create_figure_pdf(config, pdf_name="cluster_samples.pdf"):
         try:
             df_cluster = pd.read_csv(config['project_name'] + '/predictions/clustered_windows.csv')
@@ -860,7 +999,96 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
                     ax2.plot((start_time - time_int_select[0])/1000/60, labels, '.', markersize=5)
                     pdf.savefig(fig)
                     plt.close(fig)
-                
+
+    def create_visualizations(config, pdf_name="dataset_vis.pdf"):
+        windows_path = config.get("project_name", None) + "/results/merged_windows.csv"
+        windows_df = pd.read_csv(windows_path)
+        output_dir = Path(config['project_name']) / 'results'
+        pdf_path = output_dir / pdf_name
+        with PdfPages(pdf_path) as pdf:
+            with h5py.File(h5_path, 'r') as h5f:
+                for dataset in windows_df['dataset'].unique():
+                    # # Create a CDF of seizure durations
+                    df = windows_df[windows_df['dataset'] == dataset]
+                    seizures = df[df["label"] == 'seizure'].sort_values(by='duration')
+                    fig = plt.figure(figsize=(10, 6))
+                    plt.hist(seizures['duration'], bins=30, density=True, cumulative=True, color='blue', alpha=0.7)
+                    plt.title('CDF of Seizure Durations, Dataset: ' + dataset)
+                    plt.xlabel('Duration (seconds)')
+                    plt.ylabel('Cumulative Probability')
+                    plt.grid(True)
+                    pdf.savefig(fig)
+                    plt.show()
+
+                    # For each dataset, also plot the original signal, along with when the labels occur
+                    eeg_signal = h5f['processed_data'][dataset][:]
+
+                    start_indices = df['start_idx'].tolist()
+                    time_int_select = h5f['time_data'][dataset][:]
+                    start_time = time_int_select[start_indices]
+                    labels = df['label']
+                    plt.ion()
+                    fig = plt.figure(figsize=(15,6))
+                    ax1 = fig.add_subplot(111)
+                    ax2 = ax1.twinx()
+                    ax1.plot((time_int_select - time_int_select[0])/1000/60, eeg_signal, 'r')
+                    ax2.plot((start_time - time_int_select[0])/1000/60, labels, '.', markersize=5)
+                    
+                    # title
+                    ax1.set_title('EEG Signal with Behavior Labels, Dataset: ' + dataset)
+                    ax1.set_xlabel('Time (minutes)')
+                    ax1.set_ylabel('EEG Signal', color='r')
+                    ax2.set_ylabel('Behavior Label', color='b')
+                    pdf.savefig(fig)
+                    plt.show()
+                    plt.close(fig)
+                    
+
+                    # For each minute of data in the dataset, plot a behavior density label over time.
+                    # Plot behavior label density over time (heatmap)
+
+                    # Define time bins (e.g., 1 minute bins)
+                    total_minutes = int(np.ceil((df[df['dataset'] == dataset]['end_time'].max() - df[df['dataset'] == dataset]['start_time'].min()) / 60))
+                    time_bins = np.arange(0, total_minutes + 1) * 60  # in seconds
+
+                    # Get unique labels and map to y-axis
+                    labels = df['label'].unique()
+                    labels.sort()
+                    label_to_idx = {label: idx for idx, label in enumerate(labels)}
+
+                    # Create a 2D array: rows=labels, cols=time bins
+                    density = np.zeros((len(labels), len(time_bins) - 1))
+
+                    df_dataset = df[df['dataset'] == dataset]
+                    for _, row in df_dataset.iterrows():
+                        label_idx = label_to_idx[row['label']]
+                        # Find which bins this window covers
+                        start = row['start_time']
+                        end = row['end_time']
+                        # Find overlapping bins
+                        bin_indices = np.where((time_bins[:-1] < end) & (time_bins[1:] > start))[0]
+                        for b in bin_indices:
+                            # Compute overlap duration in this bin
+                            bin_start = time_bins[b]
+                            bin_end = time_bins[b+1]
+                            overlap = max(0, min(end, bin_end) - max(start, bin_start))
+                            density[label_idx, b] += overlap / 60.0  # convert to minutes
+
+                    fig, ax = plt.subplots(figsize=(16, 4))
+                    im = ax.imshow(density, aspect='auto', cmap='plasma', interpolation='nearest')
+                    ax.set_yticks(np.arange(len(labels)))
+                    ax.set_yticklabels(labels)
+                    ax.set_xlabel('Time (minutes)')
+                    ax.set_ylabel('Label')
+                    ax.set_title('Behavior Label Density Over Time, Dataset: ' + dataset)
+                    ax.set_xticks(np.arange(0, len(time_bins)-1, max(1, (len(time_bins)-1)//10)))
+                    ax.set_xticklabels(np.arange(0, total_minutes+1, max(1, (total_minutes)//10)))
+                    cbar = fig.colorbar(im, ax=ax)
+                    cbar.set_label('Duration (minutes)')
+                    pdf.savefig(fig)
+                    plt.show()
+                    plt.close(fig)
+    
 
     return {
         'h5_path': h5_path,
@@ -868,9 +1096,9 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
         'fit_gmm': fit_gmm_on_sample,
         'predict_gmm': predict_all_gmm,
         'create_figure_pdf': create_figure_pdf,
-        'create': show_figure,
         'label': interactive_label_clusters_ui,
         'create_labeled_pdf': create_signal_pdf,
-        'create_clustered_dataframe': generate_clustered_dataframe,
+        'create_merged_dataset': create_merged_seizures,
+        'create_visualizations': create_visualizations,
         'loader_class': HDF5FeatureLoader
     }
