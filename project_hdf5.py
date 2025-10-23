@@ -582,7 +582,7 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
         if (not os.path.exists(npz_path)):
             raise ValueError(f"Predictions file not found: {npz_path}, run GMM prediction first")
         
-        data = np.load("/Users/alexa/Projects/ChenLab/seizure_library/test_project/predictions/gmm_predictions.npz")
+        data = np.load(npz_path)
 
 
         all_windows = []
