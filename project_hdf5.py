@@ -586,7 +586,7 @@ def create_analysis_pipeline_hdf5(h5_path: str, config: dict, output_dir: str = 
 
 
         all_windows = []
-        with h5py.File("/Users/alexa/Projects/ChenLab/seizure_library/test_project/data_store.h5", 'a') as h5f:
+        with h5py.File(h5_path, 'a') as h5f:
             for dataset in h5f['processed_data']:
                 meta_data = h5f['metadata'][dataset + '_window_info'][:]
                 eeg_data = h5f['processed_data'][dataset][:]
